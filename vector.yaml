@@ -2,7 +2,9 @@ sources:
   http_logs:
     type: http_server
     address: "0.0.0.0:${VECTOR_PORT:-8080}"
-    method: POST
+    # Note: Not restricting method to allow GET requests for health checks
+    # GET requests (health checks) won't have bodies, so they won't create log events
+    # but will return 200 OK. POST requests with JSON bodies will be processed as logs.
     decoding:
       codec: json
     framing:
