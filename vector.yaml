@@ -16,76 +16,57 @@ transforms:
     inputs: [http_logs]
     source: |
       # Extract the log message (could be in 'log' field or 'message' field)
-      log_content = .log ?? .message ?? string!(.)
+      log_content = if exists(.log) { string!(.log) } else if exists(.message) { string!(.message) } else { string!(.) }
       
       # Check if the log content appears to be incomplete JSON (doesn't end with })
       is_complete = match(log_content, r'^.*\}$')
+      .is_complete = is_complete == true
       
       # Store the log content and completion status
       .log_content = log_content
-      .is_complete = is_complete ?? false
       
       # Create a grouping key based on timestamp and service/app to group related log fragments
       # This ensures we only merge logs from the same source and timeframe
-      timestamp_str = string!(.@timestamp ?? .timestamp ?? "")
-      service_str = string!(.service ?? .app ?? "")
+      timestamp_str = if exists(.@timestamp) { string!(.@timestamp) } else if exists(.timestamp) { string!(.timestamp) } else { "" }
+      service_str = if exists(.service) { string!(.service) } else if exists(.app) { string!(.app) } else { "" }
       .group_key = timestamp_str + "|" + service_str
 
-  # Merge consecutive incomplete JSON entries using reduce transform
+  # Merge consecutive incomplete JSON entries using reduce transform with merge_strategies
   merge_multiline:
     type: reduce
     inputs: [prepare_multiline]
     group_by:
       - group_key
-    reduce:
-      source: |
-        # Concatenate all log_content fields from events in the group
-        merged_log = ""
-        for event in .events {
-          merged_log = merged_log + event.log_content
-        }
-        
-        # Check if merged log is now complete JSON
-        is_complete_json = match(merged_log, r'^.*\}$')
-        
-        # Store merged content
-        .log_content = merged_log
-        .is_complete = is_complete_json ?? false
-        
-        # Copy fields from first event (preserving metadata)
-        first_event = .events[0]
-        for key, value in first_event {
-          if key != "log_content" && key != "is_complete" && key != "group_key" {
-            .[key] = value
-          }
-        }
-        
-        # Update log/message field with merged content
-        if exists(.log) {
-          .log = merged_log
-        } else if exists(.message) {
-          .message = merged_log
-        } else {
-          .message = merged_log
-        }
+    merge_strategies:
+      log_content: concat
+    expire_after_ms: 5000
+    max_events: 100
+    ends_when: |
+      match(string!(.log_content), r'^.*\}$') == true
 
-  # Parse the merged JSON log content and clean up helper fields
+  # Process merged events and parse JSON
   parse_json:
     type: remap
     inputs: [merge_multiline]
     source: |
-      log_content = .log ?? .message ?? ""
+      # Get merged log content (reduce will concatenate log_content fields)
+      log_content = if exists(.log_content) { string!(.log_content) } else if exists(.log) { string!(.log) } else if exists(.message) { string!(.message) } else { "" }
+      
+      # Check if merged content is complete JSON
+      is_complete_json = match(log_content, r'^.*\}$')
+      is_complete = is_complete_json == true
       
       # Try to parse the log content as JSON if it appears complete
-      if .is_complete {
-        parsed = parse_json(log_content) ?? {}
-        
-        # Merge parsed JSON fields into the event
-        for key, value in parsed {
-          .[key] = value
+      if is_complete {
+        parsed, parse_err = parse_json(log_content)
+        if parse_err == null && is_object(parsed) {
+          # Store parsed JSON as a nested object for Datadog
+          .parsed_json = parsed
         }
-        
         # Keep the original log field for Datadog
+        .log = log_content
+      } else {
+        # If still incomplete, just pass through the log content
         .log = log_content
       }
       
