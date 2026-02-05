@@ -11,76 +11,131 @@ sources:
       method: bytes
 
 transforms:
-  # Prepare events for multi-line merging
-  # Extract log content and create a grouping key to identify related log fragments
-  prepare_multiline:
+  # Classify logs as AUDIT (multi-line) or regular (single-line)
+  classify_logs:
     type: remap
     inputs: [http_logs]
     source: |
-      # Extract the log message (could be in 'log' field or 'message' field)
-      log_content = if exists(.log) { string!(.log) } else if exists(.message) { string!(.message) } else { string!(.) }
-      
-      # Check if the log content appears to be incomplete JSON (doesn't end with })
-      is_complete = match(log_content, r'^.*\}$')
-      .is_complete = is_complete == true
-      
-      # Store the log content and completion status
+      # Extract the log content
+      log_content = if exists(.log) { string!(.log) } else if exists(.message) { string!(.message) } else { "" }
       .log_content = log_content
       
-      # Create a grouping key based on timestamp and service/app to group related log fragments
-      # This ensures we only merge logs from the same source and timeframe
-      timestamp_str = if exists(.@timestamp) { string!(.@timestamp) } else if exists(.timestamp) { string!(.timestamp) } else { "" }
-      service_str = if exists(.service) { string!(.service) } else if exists(.app) { string!(.app) } else { "" }
-      .group_key = timestamp_str + "|" + service_str
+      # Detect if this is an AUDIT log start line
+      # Pattern: "YYYY-MM-DD HH:MM:SS UTC LOG:  AUDIT:"
+      is_audit_start = match(log_content, r'LOG:\s+AUDIT:')
+      .is_audit_start = is_audit_start
+      
+      # Detect if this is a continuation line (starts with tab character \t)
+      # The \u0009 in JSON becomes a tab character
+      is_continuation = match(log_content, r'^\t') || match(log_content, r'^\s{2,}')
+      .is_continuation = is_continuation
+      
+      # Detect if this is the end of an AUDIT entry (contains "<not logged>")
+      is_audit_end = match(log_content, r'<not logged>')
+      .is_audit_end = is_audit_end
+      
+      # Mark as AUDIT-related if it's a start, continuation, or end
+      .is_audit_related = is_audit_start || is_continuation || is_audit_end
+      
+      # Preserve the original time field for grouping
+      .original_time = if exists(.time) { .time } else { "" }
 
-  # Merge consecutive incomplete JSON entries using reduce transform with merge_strategies
-  merge_multiline:
+  # Route AUDIT logs vs regular logs
+  route_logs:
+    type: route
+    inputs: [classify_logs]
+    route:
+      audit: .is_audit_related == true
+      regular: .is_audit_related == false
+
+  # Merge multi-line AUDIT logs
+  # Uses starts_when to detect new AUDIT entries and merge until the next one
+  merge_audit_logs:
     type: reduce
-    inputs: [prepare_multiline]
-    group_by:
-      - group_key
+    inputs: [route_logs.audit]
+    group_by: []
     merge_strategies:
-      log_content: concat
-    expire_after_ms: 5000
-    max_events: 100
-    ends_when: |
-      match(string!(.log_content), r'^.*\}$') == true
+      log_content: concat_newline
+      original_time: retain
+      stream: retain
+      time: retain
+    starts_when: |
+      # A new AUDIT entry starts when we see "LOG:  AUDIT:" pattern
+      match(string!(.log_content), r'LOG:\s+AUDIT:')
+    expire_after_ms: 10000
+    flush_period_ms: 5000
 
-  # Process merged events and parse JSON
-  parse_json:
+  # Process merged AUDIT logs
+  process_audit:
     type: remap
-    inputs: [merge_multiline]
+    inputs: [merge_audit_logs]
     source: |
-      # Get merged log content (reduce will concatenate log_content fields)
-      log_content = if exists(.log_content) { string!(.log_content) } else if exists(.log) { string!(.log) } else if exists(.message) { string!(.message) } else { "" }
+      # Get the merged log content
+      log_content = if exists(.log_content) { string!(.log_content) } else { "" }
       
-      # Check if merged content is complete JSON
-      is_complete_json = match(log_content, r'^.*\}$')
-      is_complete = is_complete_json == true
+      # Clean up the log content - replace literal \n with actual newlines if needed
+      # and normalize whitespace
+      .message = log_content
       
-      # Try to parse the log content as JSON if it appears complete
-      if is_complete {
-        parsed, parse_err = parse_json(log_content)
-        if parse_err == null && is_object(parsed) {
-          # Store parsed JSON as a nested object for Datadog
-          .parsed_json = parsed
+      # Extract AUDIT metadata using regex
+      # Pattern: "YYYY-MM-DD HH:MM:SS UTC LOG:  AUDIT: SESSION,N,N,TYPE,OPERATION,,,\"SQL\""
+      audit_match, err = parse_regex(log_content, r'(?P<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC) LOG:\s+AUDIT:\s+(?P<audit_class>\w+),(?P<statement_id>\d+),(?P<substatement_id>\d+),(?P<class>\w+),(?P<command>\w+),,,')
+      
+      if err == null {
+        .audit = {
+          "timestamp": audit_match.timestamp,
+          "audit_class": audit_match.audit_class,
+          "statement_id": audit_match.statement_id,
+          "substatement_id": audit_match.substatement_id,
+          "class": audit_match.class,
+          "command": audit_match.command
         }
-        # Keep the original log field for Datadog
-        .log = log_content
+        .log_type = "pg_audit"
       } else {
-        # If still incomplete, just pass through the log content
-        .log = log_content
+        .log_type = "pg_audit_unknown"
       }
       
-      # Remove helper fields
+      # Set the log field for Datadog
+      .log = log_content
+      
+      # Clean up helper fields
       del(.log_content)
-      del(.is_complete)
-      del(.group_key)
+      del(.is_audit_start)
+      del(.is_continuation)
+      del(.is_audit_end)
+      del(.is_audit_related)
+
+  # Process regular (non-AUDIT) logs - pass through with minimal processing
+  process_regular:
+    type: remap
+    inputs: [route_logs.regular]
+    source: |
+      # Get the log content
+      log_content = if exists(.log_content) { string!(.log_content) } else { "" }
+      
+      # Set the message and log fields
+      .message = log_content
+      .log = log_content
+      .log_type = "postgres"
+      
+      # Clean up helper fields
+      del(.log_content)
+      del(.is_audit_start)
+      del(.is_continuation)
+      del(.is_audit_end)
+      del(.is_audit_related)
 
 sinks:
+  # Uncomment below for local debugging (shows processed logs in container output)
+  # console_debug:
+  #   type: console
+  #   inputs: [process_audit, process_regular]
+  #   encoding:
+  #     codec: json
+
   datadog:
     type: datadog_logs
-    inputs: [parse_json]
+    inputs: [process_audit, process_regular]
     default_api_key: "${DD_API_KEY}"
     site: "${DD_SITE:-datadoghq.com}"
     compression: gzip
