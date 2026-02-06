@@ -4,7 +4,7 @@ A containerized Vector deployment that ingests logs from Aptible's HTTPS log dra
 
 ## Overview
 
-This solution addresses a common issue where PostgreSQL audit logs (`pg_audit`) are split across multiple log lines due to embedded newlines in SQL queries. Vector intelligently merges these fragmented logs into complete entries before forwarding them to Datadog.
+This solution addresses a common issue where PostgreSQL audit logs (`pgaudit`) are split across multiple log lines due to embedded newlines in SQL queries. Vector intelligently merges these fragmented logs into complete entries before forwarding them to Datadog.
 
 ### Features
 
@@ -106,7 +106,7 @@ aptible config:set \
 ```json
 {
   "log": "2026-02-05 17:42:00 UTC LOG:  AUDIT: SESSION,1,1,READ,SELECT,,,\"SELECT COUNT(*) \n\t    AS total_events \n\t    FROM fake_events\",<not logged>\n",
-  "log_type": "pg_audit",
+  "log_type": "pgaudit",
   "audit": {
     "timestamp": "2026-02-05 17:42:00 UTC",
     "audit_class": "SESSION",
