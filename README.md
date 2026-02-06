@@ -161,13 +161,6 @@ aptible config:set \
    docker logs vector-test
    ```
 
-### Production Testing
-
-Use the provided test script:
-```bash
-VECTOR_URL="https://your-vector-app.on-aptible.com" ./test_commands.sh
-```
-
 ## Troubleshooting
 
 ### Health Check Failures
