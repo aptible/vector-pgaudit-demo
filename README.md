@@ -51,7 +51,17 @@ Aptible HTTPS Log Drain → Vector HTTP Server → Multi-line Merge → Datadog 
    git push aptible master
    ```
 
-5. **Configure HTTPS log drain**:
+5. **Create internal HTTPS endpoint**:
+   ```bash
+   aptible endpoints:https:create \
+     --app your-app-name \
+     --internal \
+     --default-domain \
+     cmd
+   ```
+   Note: For apps using an implicit service, the service name is `cmd`. See the [Aptible documentation](https://www.aptible.com/docs/reference/aptible-cli/cli-commands/cli-endpoints-https-create) for more details. Use the resulting endpoint URL in the following step.
+
+6. **Configure HTTPS log drain**:
    ```bash
    aptible log_drain:create:https \
      --app your-app-name \
