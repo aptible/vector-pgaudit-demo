@@ -90,9 +90,9 @@ transforms:
           "class": audit_match.class,
           "command": audit_match.command
         }
-        .log_type = "pg_audit"
+        .log_type = "pgaudit"
       } else {
-        .log_type = "pg_audit_unknown"
+        .log_type = "pgaudit_unknown"
       }
       
       # Set the log field for Datadog
